@@ -9,7 +9,7 @@ import {
   verifyKeyMiddleware,
 } from 'discord-interactions';
 import { getRandomEmoji, DiscordRequest } from './utils.js';
-import { saveStudySession, getUserStats, getGuildStats } from './db-utils.js';
+import { saveStudySession, getUserStats, getGuildStats, getUserHeatmapData } from './db-utils.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -253,11 +253,22 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
     // ... rest of the command handlers remain the same ...
     if (name === 'stats') {
       try {
-        const stats = await getUserStats(member.user.id);
+        const [stats, heatmapData] = await Promise.all([
+          getUserStats(member.user.id),
+          getUserHeatmapData(member.user.id)
+        ]);
+
+        const statsMessage =
+          `📊 Your Study Statistics:\n` +
+          `• Total sessions: ${stats.total_sessions}\n` +
+          `• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n` +
+          `• Last session: ${new Date(stats.last_session).toLocaleDateString()}\n\n` +
+          generateDiscordHeatmap(heatmapData);
+
         return res.send({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `📊 Your Study Statistics:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n• Last session: ${new Date(stats.last_session).toLocaleDateString()}`,
+            content: statsMessage,
             flags: InteractionResponseFlags.EPHEMERAL
           },
         });
@@ -446,3 +457,52 @@ function parseTimerInput(input, username) {
 
   return { duration, task };
 }
+function generateDiscordHeatmap(data) {
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  // We'll use 4-hour blocks instead of individual hours to keep it compact
+  const timeBlocks = [
+    '12am-4am', '4am-8am', '8am-12pm',
+    '12pm-4pm', '4pm-8pm', '8pm-12am'
+  ];
+
+  // Helper function to get emoji based on study duration
+  function getEmoji(value) {
+    if (!value) return '⬜'; // White square for no activity
+    if (value < 30) return '🟦'; // Light activity
+    if (value < 60) return '🟪'; // Medium activity
+    return '⬛'; // Heavy activity
+  }
+
+  // Create header
+  let heatmap = '📊 **Your Study Pattern (Last 30 Days)**\n\n';
+
+  // Add time block headers (rotated for better display)
+  heatmap += '```\n     ';
+  days.forEach(day => {
+    heatmap += day.padEnd(4, ' ');
+  });
+  heatmap += '\n';
+
+  // Add data rows
+  timeBlocks.forEach((timeBlock, i) => {
+    heatmap += timeBlock.padEnd(5, ' ');
+    days.forEach(day => {
+      // Calculate average for the 4-hour block
+      let total = 0;
+      for (let hour = i * 4; hour < (i + 1) * 4; hour++) {
+        const key = `${day}-${hour}`;
+        total += data[key] || 0;
+      }
+      const average = total / 4;
+      heatmap += getEmoji(average) + ' ';
+    });
+    heatmap += '\n';
+  });
+  heatmap += '```\n';
+
+  // Add legend
+  heatmap += '⬜ No study  🟦 < 30m/hr  🟪 30-60m/hr  ⬛ > 60m/hr\n';
+
+  return heatmap;
+}
+
