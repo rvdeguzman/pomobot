@@ -23,3 +23,6 @@ psql -d discord_study_bot -f schema.sql
 3. run ngrok
 `ngrok http 3000`
 
+4. update discord bot interactions endpoint url:
+should look like: 
+`https://aebd-107-171-216-129.ngrok-free.app/interactions`
