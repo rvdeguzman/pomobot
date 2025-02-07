@@ -46,25 +46,17 @@ const CHALLENGE_COMMAND = {
 
 const POMO_COMMAND = {
   name: 'timer',
-  description: 'Start a pomodoro timer',
+  description: 'Start a timer (e.g. "timer 25m study math" or "timer 1h work on project")',
   type: 1,
   options: [
     {
       type: 3,
-      name: 'task',
-      description: 'What task are you working on?',
-      required: false
-    },
-    {
-      type: 4,
-      name: 'duration',
-      description: 'Duration in seconds (default: 5)',
-      required: false
-    },
+      name: 'input',
+      description: 'Duration and task (e.g. "25m study math" or "1h work on project")',
+      required: true
+    }
   ]
-};
-
-const STATS_COMMAND = {
+}; const STATS_COMMAND = {
   name: 'stats',
   description: 'View your study statistics',
   type: 1,

@@ -75,7 +75,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
           const elapsedTime = Math.floor((Date.now() - timerInfo.startTime) / 1000);
 
           // If session was at least 10 minutes (600 seconds), save it
-          if (elapsedTime >= 600) {
+          if (elapsedTime >= 6) {
             try {
               await saveStudySession(
                 member.user.id,
@@ -172,15 +172,9 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
     const { name } = data;
 
     if (name === 'timer') {
-      let duration = 5; // default duration
-      let task = "Unspecified task"; // default task
-
-      if (data.options) {
-        for (const option of data.options) {
-          if (option.name === 'duration') duration = option.value;
-          if (option.name === 'task') task = option.value;
-        }
-      }
+      const input = data.options?.[0]?.value || '';
+      const username = member.user.username;
+      const { duration, task } = parseTimerInput(input, username);
 
       const timerId = member.user.id + '_' + guild_id;
       const timerInfo = {
@@ -194,14 +188,26 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       };
 
       activeTimers[timerId] = timerInfo;
-
-      // Schedule the timer end
       scheduleTimerEnd(req.body.token, timerInfo);
+
+      // Format duration for display
+      let durationDisplay;
+      if (duration < 60) {
+        durationDisplay = `${duration} seconds`;
+      } else if (duration < 3600) {
+        durationDisplay = `${Math.floor(duration / 60)} minutes`;
+      } else {
+        const hours = Math.floor(duration / 3600);
+        const minutes = Math.floor((duration % 3600) / 60);
+        durationDisplay = minutes > 0 ?
+          `${hours} hours ${minutes} minutes` :
+          `${hours} hours`;
+      }
 
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
-          content: `⏱️ Timer Started\n⏰ Ends <t:${Math.floor(timerInfo.endTime / 1000)}:R>\n📝 Task: ${task}`,
+          content: `⏱️ Timer Started\n⏰ Duration: ${durationDisplay}\n⏰ Ends <t:${Math.floor(timerInfo.endTime / 1000)}:R>\n📝 Task: ${task}`,
           components: getTimerButtons(TimerState.RUNNING)
         },
       });
@@ -359,3 +365,47 @@ function scheduleTimerEnd(token, timerInfo) {
 app.listen(PORT, () => {
   console.log('Listening on port', PORT);
 });
+
+
+function parseTimerInput(input, username) {
+  // Default values
+  let duration = 25 * 60; // 25 minutes in seconds
+  let task = `${username}'s timer`;
+
+  if (!input) return { duration, task };
+
+  // Regular expression to match duration patterns (now including seconds)
+  const durationRegex = /^(\d+)\s*([hms])/i;
+  const match = input.match(durationRegex);
+
+  if (match) {
+    const value = parseInt(match[1]);
+    const unit = match[2].toLowerCase();
+
+    // Convert to seconds
+    switch (unit) {
+      case 'h':
+        duration = value * 3600;
+        break;
+      case 'm':
+        duration = value * 60;
+        break;
+      case 's':
+        duration = value;
+        break;
+    }
+
+    // Remove the duration part from input to get the task
+    task = input.slice(match[0].length).trim();
+  } else {
+    // If no duration specified, treat entire input as task
+    task = input.trim();
+  }
+
+  // If task is empty after parsing duration, use default personalized task
+  if (!task) {
+    task = `${username}'s timer`;
+  }
+
+  return { duration, task };
+}
