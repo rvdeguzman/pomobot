@@ -11,12 +11,18 @@ import {
 import { getRandomEmoji, DiscordRequest } from './utils.js';
 import { saveStudySession, getUserStats, getGuildStats } from './db-utils.js';
 
-// Create an express app
 const app = express();
-// Get port, or default to 3000
 const PORT = process.env.PORT || 3000;
-// To keep track of our active timers
+
+// Enhanced timer tracking with state
 const activeTimers = {};
+
+// Timer states
+const TimerState = {
+  RUNNING: 'running',
+  PAUSED: 'paused',
+  STOPPED: 'stopped'
+};
 
 app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async function(req, res) {
   const { id, type, data, member, guild_id } = req.body;
@@ -27,14 +33,102 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
 
   if (type === InteractionType.MESSAGE_COMPONENT) {
     const componentId = data.custom_id;
-
-    // Extract timer info from the stored data
     const timerId = member.user.id + '_' + guild_id;
     const timerInfo = activeTimers[timerId];
 
+    // Check if this is a timer control button
+    if (componentId.startsWith('timer_')) {
+      // Verify the user owns this timer
+      if (!timerInfo || timerInfo.userId !== member.user.id) {
+        return res.send({
+          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+          data: {
+            content: "⚠️ You can only control your own timer!",
+            flags: InteractionResponseFlags.EPHEMERAL
+          }
+        });
+      }
+
+      switch (componentId) {
+        case 'timer_pause':
+          if (timerInfo.state === TimerState.RUNNING) {
+            timerInfo.state = TimerState.PAUSED;
+            timerInfo.pausedAt = Date.now();
+            timerInfo.remainingTime = timerInfo.endTime - Date.now();
+            clearTimeout(timerInfo.timeoutId);
+          }
+          break;
+
+        case 'timer_resume':
+          if (timerInfo.state === TimerState.PAUSED) {
+            timerInfo.state = TimerState.RUNNING;
+            timerInfo.endTime = Date.now() + timerInfo.remainingTime;
+            scheduleTimerEnd(req.body.token, timerInfo);
+          }
+          break;
+
+        case 'timer_stop':
+          timerInfo.state = TimerState.STOPPED;
+          clearTimeout(timerInfo.timeoutId);
+
+          // Calculate elapsed time in seconds
+          const elapsedTime = Math.floor((Date.now() - timerInfo.startTime) / 1000);
+
+          // If session was at least 10 minutes (600 seconds), save it
+          if (elapsedTime >= 600) {
+            try {
+              await saveStudySession(
+                member.user.id,
+                timerInfo.task,
+                elapsedTime,
+                guild_id
+              );
+
+              const stats = await getUserStats(member.user.id);
+              delete activeTimers[timerId];
+
+              return res.send({
+                type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nSession saved! Your updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${stats.total_minutes % 60} minutes`,
+                  flags: InteractionResponseFlags.EPHEMERAL
+                }
+              });
+            } catch (error) {
+              console.error('Error saving stopped session:', error);
+              delete activeTimers[timerId];
+              return res.send({
+                type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+                data: {
+                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\n(Note: There was an error saving your stats)`,
+                  flags: InteractionResponseFlags.EPHEMERAL
+                }
+              });
+            }
+          } else {
+            delete activeTimers[timerId];
+            return res.send({
+              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nNote: Sessions under 10 minutes are not saved.`,
+                flags: InteractionResponseFlags.EPHEMERAL
+              }
+            });
+          }
+      }
+
+      // Update the timer message with new buttons
+      return res.send({
+        type: InteractionResponseType.UPDATE_MESSAGE,
+        data: {
+          content: getTimerContent(timerInfo),
+          components: getTimerButtons(timerInfo.state)
+        }
+      });
+    }
+
     if (componentId === 'task_complete' && timerInfo) {
       try {
-        // Save the completed session
         await saveStudySession(
           member.user.id,
           timerInfo.task,
@@ -42,7 +136,6 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
           guild_id
         );
 
-        // Get updated stats
         const stats = await getUserStats(member.user.id);
 
         return res.send({
@@ -79,61 +172,42 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
     const { name } = data;
 
     if (name === 'timer') {
-      const duration = data.options.find(opt => opt.name === 'duration')?.value || 5;
-      const task = data.options.find(opt => opt.name === 'task')?.value || "Unspecified task";
+      let duration = 5; // default duration
+      let task = "Unspecified task"; // default task
 
-      // Store timer information
+      if (data.options) {
+        for (const option of data.options) {
+          if (option.name === 'duration') duration = option.value;
+          if (option.name === 'task') task = option.value;
+        }
+      }
+
       const timerId = member.user.id + '_' + guild_id;
-      activeTimers[timerId] = {
+      const timerInfo = {
+        userId: member.user.id,
         task,
         duration,
-        startTime: Date.now()
+        startTime: Date.now(),
+        endTime: Date.now() + (duration * 1000),
+        state: TimerState.RUNNING,
+        messageToken: req.body.token
       };
 
-      await res.send({
+      activeTimers[timerId] = timerInfo;
+
+      // Schedule the timer end
+      scheduleTimerEnd(req.body.token, timerInfo);
+
+      return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
-          content: `⏱️ Starting timer for ${duration} seconds...\n📝 Task: ${task}`,
+          content: `⏱️ Timer Started\n⏰ Ends <t:${Math.floor(timerInfo.endTime / 1000)}:R>\n📝 Task: ${task}`,
+          components: getTimerButtons(TimerState.RUNNING)
         },
       });
-
-      setTimeout(async () => {
-        const endpoint = `webhooks/${process.env.APP_ID}/${req.body.token}`;
-        try {
-          await DiscordRequest(endpoint, {
-            method: 'POST',
-            body: {
-              content: `⏰ Time is up! Did you complete your task?\n📝 Task: ${task}`,
-              flags: InteractionResponseFlags.SUPPRESS_EMBEDS,
-              components: [
-                {
-                  type: MessageComponentTypes.ACTION_ROW,
-                  components: [
-                    {
-                      type: MessageComponentTypes.BUTTON,
-                      custom_id: 'task_complete',
-                      label: 'Yes, completed! ✅',
-                      style: ButtonStyleTypes.SUCCESS,
-                    },
-                    {
-                      type: MessageComponentTypes.BUTTON,
-                      custom_id: 'task_incomplete',
-                      label: 'No, not yet ❌',
-                      style: ButtonStyleTypes.DANGER,
-                    }
-                  ],
-                },
-              ],
-            },
-          });
-        } catch (err) {
-          console.error('Error sending timer completion message:', err);
-        }
-      }, duration * 1000);
-
-      return;
     }
 
+    // ... rest of the command handlers remain the same ...
     if (name === 'stats') {
       try {
         const stats = await getUserStats(member.user.id);
@@ -187,6 +261,100 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
   console.error('unknown interaction type', type);
   return res.status(400).json({ error: 'unknown interaction type' });
 });
+
+// Helper function to get timer message content
+function getTimerContent(timerInfo) {
+  const remainingTime = timerInfo.state === TimerState.PAUSED ?
+    timerInfo.remainingTime :
+    timerInfo.endTime - Date.now();
+
+  const secondsLeft = Math.max(0, Math.ceil(remainingTime / 1000));
+  const minutesLeft = Math.floor(secondsLeft / 60);
+  const remainingSeconds = secondsLeft % 60;
+
+  const endTime = new Date(timerInfo.endTime);
+  const endTimeString = endTime.toLocaleTimeString();
+
+  let status = '⏱️ Running';
+  if (timerInfo.state === TimerState.PAUSED) status = '⏸️ Paused';
+  if (timerInfo.state === TimerState.STOPPED) status = '⏹️ Stopped';
+
+  return `${status}\n⏰ Time remaining: ${minutesLeft}:${remainingSeconds.toString().padStart(2, '0')}\n🔔 Ends at: ${endTimeString}\n📝 Task: ${timerInfo.task}`;
+}
+
+// Helper function to get timer control buttons
+function getTimerButtons(state) {
+  const buttons = [];
+
+  if (state === TimerState.RUNNING) {
+    buttons.push({
+      type: MessageComponentTypes.BUTTON,
+      custom_id: 'timer_pause',
+      label: '⏸️ Pause',
+      style: ButtonStyleTypes.PRIMARY,
+    });
+  } else if (state === TimerState.PAUSED) {
+    buttons.push({
+      type: MessageComponentTypes.BUTTON,
+      custom_id: 'timer_resume',
+      label: '▶️ Resume',
+      style: ButtonStyleTypes.SUCCESS,
+    });
+  }
+
+  buttons.push({
+    type: MessageComponentTypes.BUTTON,
+    custom_id: 'timer_stop',
+    label: '⏹️ Stop',
+    style: ButtonStyleTypes.DANGER,
+  });
+
+  return [{
+    type: MessageComponentTypes.ACTION_ROW,
+    components: buttons
+  }];
+}
+
+// Helper function to schedule timer end
+function scheduleTimerEnd(token, timerInfo) {
+  const timeLeft = timerInfo.endTime - Date.now();
+
+  timerInfo.timeoutId = setTimeout(async () => {
+    if (timerInfo.state !== TimerState.RUNNING) return;
+
+    const endpoint = `webhooks/${process.env.APP_ID}/${token}`;
+    try {
+      await DiscordRequest(endpoint, {
+        method: 'POST',
+        body: {
+          content: `⏰ Time is up! Did you complete your task?\n📝 Task: ${timerInfo.task}`,
+          flags: InteractionResponseFlags.SUPPRESS_EMBEDS,
+          components: [
+            {
+              type: MessageComponentTypes.ACTION_ROW,
+              components: [
+                {
+                  type: MessageComponentTypes.BUTTON,
+                  custom_id: 'task_complete',
+                  label: 'Yes, completed! ✅',
+                  style: ButtonStyleTypes.SUCCESS,
+                },
+                {
+                  type: MessageComponentTypes.BUTTON,
+                  custom_id: 'task_incomplete',
+                  label: 'No, not yet ❌',
+                  style: ButtonStyleTypes.DANGER,
+                }
+              ],
+            },
+          ],
+        },
+      });
+    } catch (err) {
+      console.error('Error sending timer completion message:', err);
+    }
+  }, timeLeft);
+}
 
 app.listen(PORT, () => {
   console.log('Listening on port', PORT);
