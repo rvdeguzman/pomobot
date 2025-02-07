@@ -90,7 +90,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
               return res.send({
                 type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
                 data: {
-                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nSession saved! Your updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${stats.total_minutes % 60} minutes`,
+                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nSession saved! Your updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes`,
                   flags: InteractionResponseFlags.EPHEMERAL
                 }
               });
@@ -141,8 +141,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
         return res.send({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `🎉 Great job completing your task!\n\nYour stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${stats.total_minutes % 60} minutes`,
-            flags: InteractionResponseFlags.EPHEMERAL
+            content: `🎉 Great job completing your task!\n\nYour stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes`, flags: InteractionResponseFlags.EPHEMERAL
           },
         });
       } catch (error) {
@@ -168,7 +167,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
         const elapsedTime = Math.floor((timerInfo.endTime - timerInfo.startTime) / 1000);
 
         // If session was at least 10 minutes (600 seconds), save it
-        if (elapsedTime >= 6) {
+        if (elapsedTime >= 600) { // TODO: Change this to 10 mins
           try {
             await saveStudySession(
               member.user.id,
@@ -183,7 +182,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
             return res.send({
               type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
               data: {
-                content: `💪 That's okay! The ${Math.floor(elapsedTime / 60)} minute session has been recorded.\n\nYour updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${stats.total_minutes % 60} minutes\n\nWould you like to start another timer to continue working on it?`,
+                content: `💪 That's okay! The ${Math.floor(elapsedTime / 60)} minute session has been recorded.\n\nYour updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n\nWould you like to start another timer to continue working on it?`,
                 flags: InteractionResponseFlags.EPHEMERAL
               },
             });
@@ -258,7 +257,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
         return res.send({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `📊 Your Study Statistics:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${stats.total_minutes % 60} minutes\n• Last session: ${new Date(stats.last_session).toLocaleDateString()}`,
+            content: `📊 Your Study Statistics:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n• Last session: ${new Date(stats.last_session).toLocaleDateString()}`,
             flags: InteractionResponseFlags.EPHEMERAL
           },
         });
@@ -278,7 +277,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       try {
         const stats = await getGuildStats(guild_id);
         const leaderboard = stats.map((stat, index) =>
-          `${index + 1}. <@${stat.user_id}>: ${Math.floor(stat.total_minutes / 60)}h ${stat.total_minutes % 60}m (${stat.sessions_completed} sessions)`
+          `${index + 1}. <@${stat.user_id}>: ${Math.floor(stat.total_minutes / 3600)}h ${Math.floor((stat.total_minutes % 3600) / 60)}m (${stat.sessions_completed} sessions)`
         ).join('\n');
 
         return res.send({
