@@ -157,7 +157,44 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       }
     }
 
+
     if (componentId === 'task_incomplete') {
+      // Get the timer info
+      const timerId = member.user.id + '_' + guild_id;
+      const timerInfo = activeTimers[timerId];
+
+      if (timerInfo) {
+        // Calculate elapsed time in seconds
+        const elapsedTime = Math.floor((timerInfo.endTime - timerInfo.startTime) / 1000);
+
+        // If session was at least 10 minutes (600 seconds), save it
+        if (elapsedTime >= 6) {
+          try {
+            await saveStudySession(
+              member.user.id,
+              timerInfo.task,
+              elapsedTime,
+              guild_id
+            );
+
+            const stats = await getUserStats(member.user.id);
+            delete activeTimers[timerId];
+
+            return res.send({
+              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+              data: {
+                content: `💪 That's okay! The ${Math.floor(elapsedTime / 60)} minute session has been recorded.\n\nYour updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${stats.total_minutes % 60} minutes\n\nWould you like to start another timer to continue working on it?`,
+                flags: InteractionResponseFlags.EPHEMERAL
+              },
+            });
+          } catch (error) {
+            console.error('Error saving incomplete session:', error);
+            delete activeTimers[timerId];
+          }
+        }
+      }
+
+      // Default response if session was under 10 minutes or if there was an error
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
@@ -166,6 +203,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
         },
       });
     }
+
   }
 
   if (type === InteractionType.APPLICATION_COMMAND) {
