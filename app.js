@@ -459,13 +459,15 @@ function parseTimerInput(input, username) {
 }
 function generateDiscordHeatmap(data) {
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  // We'll use 4-hour blocks instead of individual hours to keep it compact
   const timeBlocks = [
-    '12am-4am', '4am-8am', '8am-12pm',
-    '12pm-4pm', '4pm-8pm', '8pm-12am'
+    '12am-4am',
+    '4am-8am ',
+    '8am-12pm',
+    '12pm-4pm',
+    '4pm-8pm ',
+    '8pm-12am'
   ];
 
-  // Helper function to get emoji based on study duration
   function getEmoji(value) {
     if (!value) return '⬜'; // White square for no activity
     if (value < 30) return '🟦'; // Light activity
@@ -476,18 +478,23 @@ function generateDiscordHeatmap(data) {
   // Create header
   let heatmap = '📊 **Your Study Pattern (Last 30 Days)**\n\n';
 
-  // Add time block headers (rotated for better display)
-  heatmap += '```\n     ';
+  // Start code block
+  heatmap += '```\n';
+
+  // Add day headers with proper spacing
+  heatmap += '          '; // Indent for time labels
   days.forEach(day => {
-    heatmap += day.padEnd(4, ' ');
+    heatmap += day + ' ';
   });
   heatmap += '\n';
 
-  // Add data rows
+  // Add data rows with proper spacing
   timeBlocks.forEach((timeBlock, i) => {
-    heatmap += timeBlock.padEnd(5, ' ');
+    // Add time block label with fixed width
+    heatmap += timeBlock.padEnd(10, ' ');
+
+    // Add squares for each day
     days.forEach(day => {
-      // Calculate average for the 4-hour block
       let total = 0;
       for (let hour = i * 4; hour < (i + 1) * 4; hour++) {
         const key = `${day}-${hour}`;
@@ -498,11 +505,13 @@ function generateDiscordHeatmap(data) {
     });
     heatmap += '\n';
   });
+
+  // Close code block
   heatmap += '```\n';
 
-  // Add legend
-  heatmap += '⬜ No study  🟦 < 30m/hr  🟪 30-60m/hr  ⬛ > 60m/hr\n';
+  // Add legend (outside code block for better emoji rendering)
+  heatmap += 'Legend:\n';
+  heatmap += '⬜ No study  🟦 < 30m/hr  🟪 30-60m/hr  ⬛ > 60m/hr';
 
   return heatmap;
 }
-
