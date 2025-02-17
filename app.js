@@ -213,33 +213,23 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       const username = member.user.username;
       const { duration, task } = parseTimerInput(input, username);
 
-      const timerId = member.user.id + '_' + guild_id;
-      const timerInfo = {
-        userId: member.user.id,
+      const timerId = `${member.user.id}_${guild_id}`;
+      const timerInfo = createTimerInfo(
+        member.user.id,
         task,
         duration,
-        startTime: Date.now(),
-        endTime: Date.now() + (duration * 1000),
-        state: TimerState.RUNNING,
-        messageToken: req.body.token
-      };
+        guild_id,
+        req.body.token
+      );
+
+      // Store channel ID for later use
+      timerInfo.channelId = req.body.channel_id;
 
       activeTimers[timerId] = timerInfo;
-      scheduleTimerEnd(req.body.token, timerInfo);
+      scheduleTimerEnd(timerInfo);
 
       // Format duration for display
-      let durationDisplay;
-      if (duration < 60) {
-        durationDisplay = `${duration} seconds`;
-      } else if (duration < 3600) {
-        durationDisplay = `${Math.floor(duration / 60)} minutes`;
-      } else {
-        const hours = Math.floor(duration / 3600);
-        const minutes = Math.floor((duration % 3600) / 60);
-        durationDisplay = minutes > 0 ?
-          `${hours} hours ${minutes} minutes` :
-          `${hours} hours`;
-      }
+      const durationDisplay = formatDurationDisplay(duration);
 
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -250,7 +240,6 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       });
     }
 
-    // ... rest of the command handlers remain the same ...
     if (name === 'stats') {
       try {
         const [stats, heatmapData] = await Promise.all([
@@ -370,18 +359,21 @@ function getTimerButtons(state) {
 }
 
 // Helper function to schedule timer end
-function scheduleTimerEnd(token, timerInfo) {
+async function scheduleTimerEnd(timerInfo) {
   const timeLeft = timerInfo.endTime - Date.now();
 
   timerInfo.timeoutId = setTimeout(async () => {
     if (timerInfo.state !== TimerState.RUNNING) return;
 
-    const endpoint = `webhooks/${process.env.APP_ID}/${token}`;
+    const timerId = `${timerInfo.userId}_${timerInfo.guildId}`;
+
     try {
+      // Create a new message with buttons instead of updating the old one
+      const endpoint = `channels/${timerInfo.channelId}/messages`;
       await DiscordRequest(endpoint, {
         method: 'POST',
         body: {
-          content: `⏰ Time is up! Did you complete your task?\n📝 Task: ${timerInfo.task}`,
+          content: `<@${timerInfo.userId}> ⏰ Time is up! Did you complete your task?\n📝 Task: ${timerInfo.task}`,
           flags: InteractionResponseFlags.SUPPRESS_EMBEDS,
           components: [
             {
@@ -406,6 +398,8 @@ function scheduleTimerEnd(token, timerInfo) {
       });
     } catch (err) {
       console.error('Error sending timer completion message:', err);
+      // Clean up the timer even if message fails
+      delete activeTimers[timerId];
     }
   }, timeLeft);
 }
@@ -514,4 +508,30 @@ function generateDiscordHeatmap(data) {
   heatmap += '⬜ No study  🟦 < 30m/hr  🟪 30-60m/hr  ⬛ > 60m/hr';
 
   return heatmap;
+}
+
+function createTimerInfo(userId, task, duration, guildId, token) {
+  return {
+    userId,
+    task,
+    duration,
+    startTime: Date.now(),
+    endTime: Date.now() + (duration * 1000),
+    state: TimerState.RUNNING,
+    guildId,
+    interactionToken: token // Store the token
+  };
+}
+function formatDurationDisplay(duration) {
+  if (duration < 60) {
+    return `${duration} seconds`;
+  } else if (duration < 3600) {
+    return `${Math.floor(duration / 60)} minutes`;
+  } else {
+    const hours = Math.floor(duration / 3600);
+    const minutes = Math.floor((duration % 3600) / 60);
+    return minutes > 0 ?
+      `${hours} hours ${minutes} minutes` :
+      `${hours} hours`;
+  }
 }
