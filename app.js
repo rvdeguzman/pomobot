@@ -52,30 +52,40 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       switch (componentId) {
         case 'timer_pause':
           if (timerInfo.state === TimerState.RUNNING) {
+            // Clear existing timeout
+            clearTimeout(timerInfo.timeoutId);
+
+            // Update timer state
             timerInfo.state = TimerState.PAUSED;
             timerInfo.pausedAt = Date.now();
             timerInfo.remainingTime = timerInfo.endTime - Date.now();
-            clearTimeout(timerInfo.timeoutId);
+
+            // Store the interaction token for later use
+            timerInfo.interactionToken = req.body.token;
           }
           break;
 
         case 'timer_resume':
           if (timerInfo.state === TimerState.PAUSED) {
+            // Update timer state
             timerInfo.state = TimerState.RUNNING;
             timerInfo.endTime = Date.now() + timerInfo.remainingTime;
-            scheduleTimerEnd(req.body.token, timerInfo);
+
+            // Reschedule the timer
+            scheduleTimerEnd(timerInfo);
           }
           break;
 
         case 'timer_stop':
-          timerInfo.state = TimerState.STOPPED;
+          // Clear any existing timeout
           clearTimeout(timerInfo.timeoutId);
+          timerInfo.state = TimerState.STOPPED;
 
           // Calculate elapsed time in seconds
           const elapsedTime = Math.floor((Date.now() - timerInfo.startTime) / 1000);
 
           // If session was at least 10 minutes (600 seconds), save it
-          if (elapsedTime >= 6) {
+          if (elapsedTime >= 600) {
             try {
               await saveStudySession(
                 member.user.id,
@@ -90,7 +100,7 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
               return res.send({
                 type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
                 data: {
-                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nSession saved! Your updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes`,
+                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nSession saved! Your updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${Math.floor(stats.total_minutes % 60)} minutes`,
                   flags: InteractionResponseFlags.EPHEMERAL
                 }
               });
@@ -359,7 +369,7 @@ function getTimerButtons(state) {
 }
 
 // Helper function to schedule timer end
-async function scheduleTimerEnd(timerInfo) {
+function scheduleTimerEnd(timerInfo) {
   const timeLeft = timerInfo.endTime - Date.now();
 
   timerInfo.timeoutId = setTimeout(async () => {
@@ -368,7 +378,7 @@ async function scheduleTimerEnd(timerInfo) {
     const timerId = `${timerInfo.userId}_${timerInfo.guildId}`;
 
     try {
-      // Create a new message with buttons instead of updating the old one
+      // Create a new message with buttons
       const endpoint = `channels/${timerInfo.channelId}/messages`;
       await DiscordRequest(endpoint, {
         method: 'POST',
@@ -396,9 +406,11 @@ async function scheduleTimerEnd(timerInfo) {
           ],
         },
       });
+
+      // Clean up the timer
+      delete activeTimers[timerId];
     } catch (err) {
       console.error('Error sending timer completion message:', err);
-      // Clean up the timer even if message fails
       delete activeTimers[timerId];
     }
   }, timeLeft);
