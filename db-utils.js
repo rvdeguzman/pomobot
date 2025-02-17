@@ -65,3 +65,35 @@ export async function getGuildStats(guildId) {
     throw error;
   }
 }
+export async function getUserHeatmapData(userId) {
+  const query = `
+    SELECT 
+      EXTRACT(DOW FROM completed_at) as day_of_week,
+      EXTRACT(HOUR FROM completed_at) as hour,
+      SUM(duration) as total_minutes
+    FROM study_sessions 
+    WHERE user_id = $1
+    AND completed_at >= NOW() - INTERVAL '30 days'
+    GROUP BY day_of_week, hour
+    ORDER BY day_of_week, hour`;
+
+  try {
+    const result = await pool.query(query, [userId]);
+
+    // Convert the raw data into a format suitable for the heatmap
+    const heatmapData = {};
+    const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+    result.rows.forEach(row => {
+      const day = days[Math.floor(row.day_of_week)];
+      const hour = Math.floor(row.hour);
+      const key = `${day}-${hour}`;
+      heatmapData[key] = Math.floor(row.total_minutes);
+    });
+
+    return heatmapData;
+  } catch (error) {
+    console.error('Error getting user heatmap data:', error);
+    throw error;
+  }
+}

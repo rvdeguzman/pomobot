@@ -9,7 +9,7 @@ import {
   verifyKeyMiddleware,
 } from 'discord-interactions';
 import { getRandomEmoji, DiscordRequest } from './utils.js';
-import { saveStudySession, getUserStats, getGuildStats } from './db-utils.js';
+import { saveStudySession, getUserStats, getGuildStats, getUserHeatmapData } from './db-utils.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -213,33 +213,23 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       const username = member.user.username;
       const { duration, task } = parseTimerInput(input, username);
 
-      const timerId = member.user.id + '_' + guild_id;
-      const timerInfo = {
-        userId: member.user.id,
+      const timerId = `${member.user.id}_${guild_id}`;
+      const timerInfo = createTimerInfo(
+        member.user.id,
         task,
         duration,
-        startTime: Date.now(),
-        endTime: Date.now() + (duration * 1000),
-        state: TimerState.RUNNING,
-        messageToken: req.body.token
-      };
+        guild_id,
+        req.body.token
+      );
+
+      // Store channel ID for later use
+      timerInfo.channelId = req.body.channel_id;
 
       activeTimers[timerId] = timerInfo;
-      scheduleTimerEnd(req.body.token, timerInfo);
+      scheduleTimerEnd(timerInfo);
 
       // Format duration for display
-      let durationDisplay;
-      if (duration < 60) {
-        durationDisplay = `${duration} seconds`;
-      } else if (duration < 3600) {
-        durationDisplay = `${Math.floor(duration / 60)} minutes`;
-      } else {
-        const hours = Math.floor(duration / 3600);
-        const minutes = Math.floor((duration % 3600) / 60);
-        durationDisplay = minutes > 0 ?
-          `${hours} hours ${minutes} minutes` :
-          `${hours} hours`;
-      }
+      const durationDisplay = formatDurationDisplay(duration);
 
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
@@ -250,14 +240,24 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async fun
       });
     }
 
-    // ... rest of the command handlers remain the same ...
     if (name === 'stats') {
       try {
-        const stats = await getUserStats(member.user.id);
+        const [stats, heatmapData] = await Promise.all([
+          getUserStats(member.user.id),
+          getUserHeatmapData(member.user.id)
+        ]);
+
+        const statsMessage =
+          `📊 Your Study Statistics:\n` +
+          `• Total sessions: ${stats.total_sessions}\n` +
+          `• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n` +
+          `• Last session: ${new Date(stats.last_session).toLocaleDateString()}\n\n` +
+          generateDiscordHeatmap(heatmapData);
+
         return res.send({
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
-            content: `📊 Your Study Statistics:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n• Last session: ${new Date(stats.last_session).toLocaleDateString()}`,
+            content: statsMessage,
             flags: InteractionResponseFlags.EPHEMERAL
           },
         });
@@ -359,18 +359,21 @@ function getTimerButtons(state) {
 }
 
 // Helper function to schedule timer end
-function scheduleTimerEnd(token, timerInfo) {
+async function scheduleTimerEnd(timerInfo) {
   const timeLeft = timerInfo.endTime - Date.now();
 
   timerInfo.timeoutId = setTimeout(async () => {
     if (timerInfo.state !== TimerState.RUNNING) return;
 
-    const endpoint = `webhooks/${process.env.APP_ID}/${token}`;
+    const timerId = `${timerInfo.userId}_${timerInfo.guildId}`;
+
     try {
+      // Create a new message with buttons instead of updating the old one
+      const endpoint = `channels/${timerInfo.channelId}/messages`;
       await DiscordRequest(endpoint, {
         method: 'POST',
         body: {
-          content: `⏰ Time is up! Did you complete your task?\n📝 Task: ${timerInfo.task}`,
+          content: `<@${timerInfo.userId}> ⏰ Time is up! Did you complete your task?\n📝 Task: ${timerInfo.task}`,
           flags: InteractionResponseFlags.SUPPRESS_EMBEDS,
           components: [
             {
@@ -395,6 +398,8 @@ function scheduleTimerEnd(token, timerInfo) {
       });
     } catch (err) {
       console.error('Error sending timer completion message:', err);
+      // Clean up the timer even if message fails
+      delete activeTimers[timerId];
     }
   }, timeLeft);
 }
@@ -445,4 +450,88 @@ function parseTimerInput(input, username) {
   }
 
   return { duration, task };
+}
+function generateDiscordHeatmap(data) {
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const timeBlocks = [
+    '12am-4am',
+    '4am-8am ',
+    '8am-12pm',
+    '12pm-4pm',
+    '4pm-8pm ',
+    '8pm-12am'
+  ];
+
+  function getEmoji(value) {
+    if (!value) return '⬜'; // White square for no activity
+    if (value < 30) return '🟦'; // Light activity
+    if (value < 60) return '🟪'; // Medium activity
+    return '⬛'; // Heavy activity
+  }
+
+  // Create header
+  let heatmap = '📊 **Your Study Pattern (Last 30 Days)**\n\n';
+
+  // Start code block
+  heatmap += '```\n';
+
+  // Add day headers with proper spacing
+  heatmap += '          '; // Indent for time labels
+  days.forEach(day => {
+    heatmap += day + ' ';
+  });
+  heatmap += '\n';
+
+  // Add data rows with proper spacing
+  timeBlocks.forEach((timeBlock, i) => {
+    // Add time block label with fixed width
+    heatmap += timeBlock.padEnd(10, ' ');
+
+    // Add squares for each day
+    days.forEach(day => {
+      let total = 0;
+      for (let hour = i * 4; hour < (i + 1) * 4; hour++) {
+        const key = `${day}-${hour}`;
+        total += data[key] || 0;
+      }
+      const average = total / 4;
+      heatmap += getEmoji(average) + ' ';
+    });
+    heatmap += '\n';
+  });
+
+  // Close code block
+  heatmap += '```\n';
+
+  // Add legend (outside code block for better emoji rendering)
+  heatmap += 'Legend:\n';
+  heatmap += '⬜ No study  🟦 < 30m/hr  🟪 30-60m/hr  ⬛ > 60m/hr';
+
+  return heatmap;
+}
+
+function createTimerInfo(userId, task, duration, guildId, token) {
+  return {
+    userId,
+    task,
+    duration,
+    startTime: Date.now(),
+    endTime: Date.now() + (duration * 1000),
+    state: TimerState.RUNNING,
+    guildId,
+    interactionToken: token // Store the token
+  };
+}
+function formatDurationDisplay(duration) {
+  if (duration < 60) {
+    return `${duration} seconds`;
+  } else if (duration < 3600) {
+    return `${Math.floor(duration / 60)} minutes`;
+  } else {
+    const hours = Math.floor(duration / 3600);
+    const minutes = Math.floor((duration % 3600) / 60);
+    return minutes > 0 ?
+      `${hours} hours ${minutes} minutes` :
+      `${hours} hours`;
+  }
 }
