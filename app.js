@@ -16,6 +16,8 @@ const PORT = process.env.PORT || 3000;
 
 // Timer state management
 const activeTimers = new Map();
+// Track completion messages
+const completionMessages = new Map();
 
 // Timer states
 const TimerState = {
@@ -25,7 +27,7 @@ const TimerState = {
 };
 
 app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (req, res) => {
-  const { type, data, member, guild_id, channel_id } = req.body;
+  const { type, data, member, guild_id, channel_id, message } = req.body;
 
   // Handle Discord PING
   if (type === InteractionType.PING) {
@@ -60,7 +62,8 @@ app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (re
 
     // Task completion buttons
     if (componentId === 'task_complete' || componentId === 'task_incomplete') {
-      return handleTaskCompletionButton(req, res, componentId, member, guild_id);
+      // Pass message info so we can update it
+      return handleTaskCompletionButton(req, res, componentId, member, guild_id, message);
     }
   }
 
@@ -270,10 +273,10 @@ async function handleTimerControlButton(req, res, componentId, member, guild_id)
               content: `⏹️ **Timer Stopped**\n\n` +
                 `⏱️ Duration: ${formatDurationDisplay(elapsedTime)}\n` +
                 `📝 Task: ${timerInfo.task}\n\n` +
-                `Session saved! Your updated stats:\n` +
+                `✅ Session saved! Your updated stats:\n` +
                 `• Total sessions: ${stats.total_sessions}\n` +
                 `• Total time: ${formatTotalTime(stats.total_minutes)}`,
-              components: []
+              components: [] // Remove all buttons
             }
           });
         } catch (error) {
@@ -285,7 +288,7 @@ async function handleTimerControlButton(req, res, componentId, member, guild_id)
                 `⏱️ Duration: ${formatDurationDisplay(elapsedTime)}\n` +
                 `📝 Task: ${timerInfo.task}\n\n` +
                 `(Note: There was an error saving your stats)`,
-              components: []
+              components: [] // Remove all buttons
             }
           });
         }
@@ -304,7 +307,7 @@ async function handleTimerControlButton(req, res, componentId, member, guild_id)
           type: InteractionResponseType.UPDATE_MESSAGE,
           data: {
             content: message,
-            components: []
+            components: [] // Remove all buttons
           }
         });
       }
@@ -327,7 +330,7 @@ async function handleTimerControlButton(req, res, componentId, member, guild_id)
 /**
  * Handles task completion buttons
  */
-async function handleTaskCompletionButton(req, res, componentId, member, guild_id) {
+async function handleTaskCompletionButton(req, res, componentId, member, guild_id, message) {
   const timerId = `${member.user.id}_${guild_id}`;
   const timerInfo = activeTimers.get(timerId);
 
@@ -394,25 +397,36 @@ async function handleTaskCompletionButton(req, res, componentId, member, guild_i
     // Get updated stats
     const stats = await getUserStats(member.user.id);
 
-    let message = '';
-    if (componentId === 'task_complete') {
-      message = `🎉 Great job completing your task!\n\n` +
-        `Your updated stats:\n` +
-        `• Total sessions: ${stats.total_sessions}\n` +
-        `• Total time: ${formatTotalTime(stats.total_minutes)}`;
-    } else {
-      message = `💪 Progress is still progress!\n\n` +
-        `Your ${formatDurationDisplay(sessionDuration)} session has been recorded.\n\n` +
-        `Your updated stats:\n` +
-        `• Total sessions: ${stats.total_sessions}\n` +
-        `• Total time: ${formatTotalTime(stats.total_minutes)}\n\n` +
-        `Would you like to start another timer?`;
+    // Update the original message to show completion
+    let completionStatus = componentId === 'task_complete'
+      ? `✅ **Task Completed**`
+      : `📝 **Session Recorded**`;
+
+    let updatedMessage = `${completionStatus}\n\n` +
+      `👤 <@${member.user.id}>\n` +
+      `⏱️ Duration: ${formatDurationDisplay(sessionDuration)}\n` +
+      `📝 Task: ${timerInfo.task}`;
+
+    // First update the message
+    await updateOriginalMessage(message.channel_id, message.id, updatedMessage);
+
+    // Then send ephemeral message with stats to the user
+    let statsMessage = componentId === 'task_complete'
+      ? `🎉 Great job completing your task!`
+      : `💪 Progress is still progress!`;
+
+    statsMessage += `\n\nYour updated stats:\n` +
+      `• Total sessions: ${stats.total_sessions}\n` +
+      `• Total time: ${formatTotalTime(stats.total_minutes)}`;
+
+    if (componentId === 'task_incomplete') {
+      statsMessage += `\n\nWould you like to start another timer?`;
     }
 
     return res.send({
       type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
       data: {
-        content: message,
+        content: statsMessage,
         flags: InteractionResponseFlags.EPHEMERAL
       }
     });
@@ -425,6 +439,42 @@ async function handleTaskCompletionButton(req, res, componentId, member, guild_i
         flags: InteractionResponseFlags.EPHEMERAL
       }
     });
+  }
+}
+
+/**
+ * Updates an existing message
+ */
+async function updateOriginalMessage(channelId, messageId, content) {
+  try {
+    const endpoint = `channels/${channelId}/messages/${messageId}`;
+    await DiscordRequest(endpoint, {
+      method: 'PATCH',
+      body: {
+        content: content,
+        components: [] // Remove buttons
+      }
+    });
+    return true;
+  } catch (error) {
+    console.error('Error updating message:', error);
+    return false;
+  }
+}
+
+/**
+ * Deletes a message
+ */
+async function deleteMessage(channelId, messageId) {
+  try {
+    const endpoint = `channels/${channelId}/messages/${messageId}`;
+    await DiscordRequest(endpoint, {
+      method: 'DELETE'
+    });
+    return true;
+  } catch (error) {
+    console.error('Error deleting message:', error);
+    return false;
   }
 }
 
@@ -462,7 +512,7 @@ async function sendTimerCompletionMessage(timerInfo) {
   try {
     // Create a new message with buttons
     const endpoint = `channels/${timerInfo.channelId}/messages`;
-    await DiscordRequest(endpoint, {
+    const response = await DiscordRequest(endpoint, {
       method: 'POST',
       body: {
         content: `<@${timerInfo.userId}> ⏰ **Time's up!** Did you complete your task?\n📝 Task: ${timerInfo.task}`,
@@ -487,6 +537,18 @@ async function sendTimerCompletionMessage(timerInfo) {
         ],
       },
     });
+
+    // Store the message ID so we can update it later
+    if (response.ok) {
+      const messageData = await response.json();
+      if (messageData && messageData.id) {
+        // Store the message ID with the timer info
+        completionMessages.set(`${timerInfo.userId}_${timerInfo.guildId}`, {
+          messageId: messageData.id,
+          channelId: timerInfo.channelId
+        });
+      }
+    }
   } catch (err) {
     console.error('Error sending timer completion message:', err);
   }
