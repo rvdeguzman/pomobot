@@ -1,76 +1,52 @@
 import 'dotenv/config';
-import { getRPSChoices } from './game.js';
-import { capitalize, InstallGlobalCommands } from './utils.js';
+import { InstallGlobalCommands } from './utils.js';
 
-// Get the game choices from game.js
-function createCommandChoices() {
-  const choices = getRPSChoices();
-  const commandChoices = [];
-
-  for (let choice of choices) {
-    commandChoices.push({
-      name: capitalize(choice),
-      value: choice.toLowerCase(),
-    });
-  }
-
-  return commandChoices;
-}
-
-// Simple test command
-const TEST_COMMAND = {
-  name: 'test',
-  description: 'Basic command',
-  type: 1,
-  integration_types: [0, 1],
-  contexts: [0, 1, 2],
-};
-
-// Command containing options
-const CHALLENGE_COMMAND = {
-  name: 'challenge',
-  description: 'is the change working',
-  options: [
-    {
-      type: 3,
-      name: 'object',
-      description: 'Pick your object',
-      required: true,
-      choices: createCommandChoices(),
-    },
-  ],
-  type: 1,
-  integration_types: [0, 1],
-  contexts: [0, 2],
-};
-
-const POMO_COMMAND = {
+// Timer command - start a pomodoro timer
+const TIMER_COMMAND = {
   name: 'timer',
-  description: 'Start a timer (e.g. "timer 25m study math" or "timer 1h work on project")',
-  type: 1,
+  description: 'Start a study timer',
+  type: 1, // CHAT_INPUT
   options: [
     {
-      type: 3,
+      type: 3, // STRING
       name: 'input',
-      description: 'Duration and task (e.g. "25m study math" or "1h work on project")',
-      required: true
+      description: 'Duration and task (e.g. "25m study math" or "1h coding")',
+      required: false
     }
   ]
-}; const STATS_COMMAND = {
-  name: 'stats',
-  description: 'View your study statistics',
-  type: 1,
 };
 
+// Stats command - view personal study statistics
+const STATS_COMMAND = {
+  name: 'stats',
+  description: 'View your study statistics and patterns',
+  type: 1, // CHAT_INPUT
+};
+
+// Leaderboard command - view server study leaderboard
 const LEADERBOARD_COMMAND = {
   name: 'leaderboard',
   description: 'View the server study leaderboard',
-  type: 1,
+  type: 1, // CHAT_INPUT
 };
 
-// Update ALL_COMMANDS array to include the new commands
-const ALL_COMMANDS = [TEST_COMMAND, CHALLENGE_COMMAND, POMO_COMMAND, STATS_COMMAND, LEADERBOARD_COMMAND];
-// Log the commands being registered
-console.log('Registering commands:', ALL_COMMANDS);
+// Help command - get help with the bot
+const HELP_COMMAND = {
+  name: 'help',
+  description: 'Get help with using the StudyBot',
+  type: 1, // CHAT_INPUT
+};
 
+// Register all commands with Discord API
+const ALL_COMMANDS = [
+  TIMER_COMMAND,
+  STATS_COMMAND,
+  LEADERBOARD_COMMAND,
+  HELP_COMMAND
+];
+
+// Log the commands being registered
+console.log('Registering commands with Discord API:', ALL_COMMANDS.map(cmd => cmd.name).join(', '));
+
+// Install commands globally to make them available in all servers
 InstallGlobalCommands(process.env.APP_ID, ALL_COMMANDS);
