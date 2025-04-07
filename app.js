@@ -8,345 +8,527 @@ import {
   MessageComponentTypes,
   verifyKeyMiddleware,
 } from 'discord-interactions';
-import { getRandomEmoji, DiscordRequest } from './utils.js';
+import { DiscordRequest } from './utils.js';
 import { saveStudySession, getUserStats, getGuildStats, getUserHeatmapData } from './db-utils.js';
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Enhanced timer tracking with state
-const activeTimers = {};
+// Timer state management
+const activeTimers = new Map();
 
 // Timer states
 const TimerState = {
   RUNNING: 'running',
   PAUSED: 'paused',
-  STOPPED: 'stopped'
+  COMPLETED: 'completed'
 };
 
-app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async function(req, res) {
-  const { id, type, data, member, guild_id } = req.body;
+app.post('/interactions', verifyKeyMiddleware(process.env.PUBLIC_KEY), async (req, res) => {
+  const { type, data, member, guild_id, channel_id } = req.body;
 
+  // Handle Discord PING
   if (type === InteractionType.PING) {
     return res.send({ type: InteractionResponseType.PONG });
   }
 
-  if (type === InteractionType.MESSAGE_COMPONENT) {
-    const componentId = data.custom_id;
-    const timerId = member.user.id + '_' + guild_id;
-    const timerInfo = activeTimers[timerId];
-
-    // Check if this is a timer control button
-    if (componentId.startsWith('timer_')) {
-      // Verify the user owns this timer
-      if (!timerInfo || timerInfo.userId !== member.user.id) {
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: "⚠️ You can only control your own timer!",
-            flags: InteractionResponseFlags.EPHEMERAL
-          }
-        });
-      }
-
-      switch (componentId) {
-        case 'timer_pause':
-          if (timerInfo.state === TimerState.RUNNING) {
-            // Clear existing timeout
-            clearTimeout(timerInfo.timeoutId);
-
-            // Update timer state
-            timerInfo.state = TimerState.PAUSED;
-            timerInfo.pausedAt = Date.now();
-            timerInfo.remainingTime = timerInfo.endTime - Date.now();
-
-            // Store the interaction token for later use
-            timerInfo.interactionToken = req.body.token;
-          }
-          break;
-
-        case 'timer_resume':
-          if (timerInfo.state === TimerState.PAUSED) {
-            // Update timer state
-            timerInfo.state = TimerState.RUNNING;
-            timerInfo.endTime = Date.now() + timerInfo.remainingTime;
-
-            // Reschedule the timer
-            scheduleTimerEnd(timerInfo);
-          }
-          break;
-
-        case 'timer_stop':
-          // Clear any existing timeout
-          clearTimeout(timerInfo.timeoutId);
-          timerInfo.state = TimerState.STOPPED;
-
-          // Calculate elapsed time in seconds
-          const elapsedTime = Math.floor((Date.now() - timerInfo.startTime) / 1000);
-
-          // If session was at least 10 minutes (600 seconds), save it
-          if (elapsedTime >= 600) {
-            try {
-              await saveStudySession(
-                member.user.id,
-                timerInfo.task,
-                elapsedTime,
-                guild_id
-              );
-
-              const stats = await getUserStats(member.user.id);
-              delete activeTimers[timerId];
-
-              return res.send({
-                type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-                data: {
-                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nSession saved! Your updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 60)} hours ${Math.floor(stats.total_minutes % 60)} minutes`,
-                  flags: InteractionResponseFlags.EPHEMERAL
-                }
-              });
-            } catch (error) {
-              console.error('Error saving stopped session:', error);
-              delete activeTimers[timerId];
-              return res.send({
-                type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-                data: {
-                  content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\n(Note: There was an error saving your stats)`,
-                  flags: InteractionResponseFlags.EPHEMERAL
-                }
-              });
-            }
-          } else {
-            delete activeTimers[timerId];
-            return res.send({
-              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                content: `⏹️ Timer stopped after ${Math.floor(elapsedTime / 60)} minutes ${elapsedTime % 60} seconds.\nNote: Sessions under 10 minutes are not saved.`,
-                flags: InteractionResponseFlags.EPHEMERAL
-              }
-            });
-          }
-      }
-
-      // Update the timer message with new buttons
-      return res.send({
-        type: InteractionResponseType.UPDATE_MESSAGE,
-        data: {
-          content: getTimerContent(timerInfo),
-          components: getTimerButtons(timerInfo.state)
-        }
-      });
-    }
-
-    if (componentId === 'task_complete' && timerInfo) {
-      try {
-        await saveStudySession(
-          member.user.id,
-          timerInfo.task,
-          timerInfo.duration,
-          guild_id
-        );
-
-        const stats = await getUserStats(member.user.id);
-
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: `🎉 Great job completing your task!\n\nYour stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes`, flags: InteractionResponseFlags.EPHEMERAL
-          },
-        });
-      } catch (error) {
-        console.error('Error handling task completion:', error);
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: '🎉 Great job completing your task! (Note: There was an error saving your stats)',
-            flags: InteractionResponseFlags.EPHEMERAL
-          },
-        });
-      }
-    }
-
-
-    if (componentId === 'task_incomplete') {
-      // Get the timer info
-      const timerId = member.user.id + '_' + guild_id;
-      const timerInfo = activeTimers[timerId];
-
-      if (timerInfo) {
-        // Calculate elapsed time in seconds
-        const elapsedTime = Math.floor((timerInfo.endTime - timerInfo.startTime) / 1000);
-
-        // If session was at least 10 minutes (600 seconds), save it
-        if (elapsedTime >= 600) { // TODO: Change this to 10 mins
-          try {
-            await saveStudySession(
-              member.user.id,
-              timerInfo.task,
-              elapsedTime,
-              guild_id
-            );
-
-            const stats = await getUserStats(member.user.id);
-            delete activeTimers[timerId];
-
-            return res.send({
-              type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-              data: {
-                content: `💪 That's okay! The ${Math.floor(elapsedTime / 60)} minute session has been recorded.\n\nYour updated stats:\n• Total sessions: ${stats.total_sessions}\n• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n\nWould you like to start another timer to continue working on it?`,
-                flags: InteractionResponseFlags.EPHEMERAL
-              },
-            });
-          } catch (error) {
-            console.error('Error saving incomplete session:', error);
-            delete activeTimers[timerId];
-          }
-        }
-      }
-
-      // Default response if session was under 10 minutes or if there was an error
-      return res.send({
-        type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-        data: {
-          content: '💪 That\'s okay! Would you like to start another timer to continue working on it?',
-          flags: InteractionResponseFlags.EPHEMERAL
-        },
-      });
-    }
-
-  }
-
+  // Handle command interactions
   if (type === InteractionType.APPLICATION_COMMAND) {
     const { name } = data;
 
-    if (name === 'timer') {
-      const input = data.options?.[0]?.value || '';
-      const username = member.user.username;
-      const { duration, task } = parseTimerInput(input, username);
+    switch (name) {
+      case 'timer':
+        return handleTimerCommand(req, res);
+      case 'stats':
+        return handleStatsCommand(req, res, member, guild_id);
+      case 'leaderboard':
+        return handleLeaderboardCommand(req, res, guild_id);
+      default:
+        console.error(`Unknown command: ${name}`);
+        return res.status(400).json({ error: 'Unknown command' });
+    }
+  }
 
-      const timerId = `${member.user.id}_${guild_id}`;
-      const timerInfo = createTimerInfo(
-        member.user.id,
-        task,
-        duration,
-        guild_id,
-        req.body.token
-      );
+  // Handle message component interactions (buttons)
+  if (type === InteractionType.MESSAGE_COMPONENT) {
+    const componentId = data.custom_id;
 
-      // Store channel ID for later use
-      timerInfo.channelId = req.body.channel_id;
+    // Timer control buttons
+    if (componentId.startsWith('timer_')) {
+      return handleTimerControlButton(req, res, componentId, member, guild_id);
+    }
 
-      activeTimers[timerId] = timerInfo;
-      scheduleTimerEnd(timerInfo);
+    // Task completion buttons
+    if (componentId === 'task_complete' || componentId === 'task_incomplete') {
+      return handleTaskCompletionButton(req, res, componentId, member, guild_id);
+    }
+  }
 
-      // Format duration for display
-      const durationDisplay = formatDurationDisplay(duration);
+  console.error('Unknown interaction type', type);
+  return res.status(400).json({ error: 'Unknown interaction type' });
+});
 
+/**
+ * Handles the /timer command
+ */
+async function handleTimerCommand(req, res) {
+  const { data, member, guild_id, channel_id } = req.body;
+  const input = data.options?.[0]?.value || '';
+  const { duration, task } = parseTimerInput(input, member.user.username);
+
+  // Create a unique timer ID
+  const timerId = `${member.user.id}_${guild_id}`;
+
+  // Create timer info
+  const timerInfo = {
+    userId: member.user.id,
+    task,
+    duration,
+    startTime: Math.floor(Date.now() / 1000), // Store as unix seconds for Discord timestamp
+    endTime: Math.floor(Date.now() / 1000) + duration,
+    state: TimerState.RUNNING,
+    guildId: guild_id,
+    channelId: channel_id,
+    messageId: null, // Will be set after response
+    saved: false // Track if this session has been saved to DB
+  };
+
+  // Store the timer
+  activeTimers.set(timerId, timerInfo);
+
+  // Schedule the timer completion notification
+  scheduleTimerEnd(timerInfo);
+
+  // Format duration for display
+  const durationDisplay = formatDurationDisplay(duration);
+
+  return res.send({
+    type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+    data: {
+      content: createTimerMessage(timerInfo),
+      components: createTimerControls(TimerState.RUNNING)
+    },
+  });
+}
+
+/**
+ * Handles the /stats command
+ */
+async function handleStatsCommand(req, res, member, guild_id) {
+  try {
+    const [stats, heatmapData] = await Promise.all([
+      getUserStats(member.user.id),
+      getUserHeatmapData(member.user.id)
+    ]);
+
+    const statsMessage =
+      `📊 **Your Study Statistics**\n\n` +
+      `• Total sessions: ${stats.total_sessions || 0}\n` +
+      `• Total time: ${formatTotalTime(stats.total_minutes || 0)}\n` +
+      `• Last session: ${stats.last_session ? new Date(stats.last_session).toLocaleDateString() : 'No sessions yet'}\n\n` +
+      generateStudyHeatmap(heatmapData);
+
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: statsMessage,
+        flags: InteractionResponseFlags.EPHEMERAL
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching user stats:', error);
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: '❌ There was an error fetching your statistics.',
+        flags: InteractionResponseFlags.EPHEMERAL
+      },
+    });
+  }
+}
+
+/**
+ * Handles the /leaderboard command
+ */
+async function handleLeaderboardCommand(req, res, guild_id) {
+  try {
+    const stats = await getGuildStats(guild_id);
+
+    if (!stats || stats.length === 0) {
       return res.send({
         type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
         data: {
-          content: `⏱️ Timer Started\n⏰ Duration: ${durationDisplay}\n⏰ Ends <t:${Math.floor(timerInfo.endTime / 1000)}:R>\n📝 Task: ${task}`,
-          components: getTimerButtons(TimerState.RUNNING)
+          content: '📊 No study sessions have been recorded in this server yet!'
         },
       });
     }
 
-    if (name === 'stats') {
-      try {
-        const [stats, heatmapData] = await Promise.all([
-          getUserStats(member.user.id),
-          getUserHeatmapData(member.user.id)
-        ]);
+    const leaderboardEntries = stats.map((stat, index) =>
+      `${getLeaderboardMedal(index)} <@${stat.user_id}>: ${formatTotalTime(stat.total_minutes)} (${stat.sessions_completed} sessions)`
+    ).join('\n');
 
-        const statsMessage =
-          `📊 Your Study Statistics:\n` +
-          `• Total sessions: ${stats.total_sessions}\n` +
-          `• Total time: ${Math.floor(stats.total_minutes / 3600)} hours ${Math.floor((stats.total_minutes % 3600) / 60)} minutes\n` +
-          `• Last session: ${new Date(stats.last_session).toLocaleDateString()}\n\n` +
-          generateDiscordHeatmap(heatmapData);
-
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: statsMessage,
-            flags: InteractionResponseFlags.EPHEMERAL
-          },
-        });
-      } catch (error) {
-        console.error('Error fetching user stats:', error);
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: 'Sorry, there was an error fetching your statistics.',
-            flags: InteractionResponseFlags.EPHEMERAL
-          },
-        });
-      }
-    }
-
-    if (name === 'leaderboard') {
-      try {
-        const stats = await getGuildStats(guild_id);
-        const leaderboard = stats.map((stat, index) =>
-          `${index + 1}. <@${stat.user_id}>: ${Math.floor(stat.total_minutes / 3600)}h ${Math.floor((stat.total_minutes % 3600) / 60)}m (${stat.sessions_completed} sessions)`
-        ).join('\n');
-
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: `📊 Study Leaderboard:\n${leaderboard}`,
-          },
-        });
-      } catch (error) {
-        console.error('Error fetching leaderboard:', error);
-        return res.send({
-          type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
-          data: {
-            content: 'Sorry, there was an error fetching the leaderboard.',
-          },
-        });
-      }
-    }
-
-    console.error(`unknown command: ${name}`);
-    return res.status(400).json({ error: 'unknown command' });
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: `📊 **Study Leaderboard**\n\n${leaderboardEntries}`
+      },
+    });
+  } catch (error) {
+    console.error('Error fetching leaderboard:', error);
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: '❌ There was an error fetching the leaderboard.'
+      },
+    });
   }
-
-  console.error('unknown interaction type', type);
-  return res.status(400).json({ error: 'unknown interaction type' });
-});
-
-// Helper function to get timer message content
-function getTimerContent(timerInfo) {
-  const remainingTime = timerInfo.state === TimerState.PAUSED ?
-    timerInfo.remainingTime :
-    timerInfo.endTime - Date.now();
-
-  const secondsLeft = Math.max(0, Math.ceil(remainingTime / 1000));
-  const minutesLeft = Math.floor(secondsLeft / 60);
-  const remainingSeconds = secondsLeft % 60;
-
-  const endTime = new Date(timerInfo.endTime);
-  const endTimeString = endTime.toLocaleTimeString();
-
-  let status = '⏱️ Running';
-  if (timerInfo.state === TimerState.PAUSED) status = '⏸️ Paused';
-  if (timerInfo.state === TimerState.STOPPED) status = '⏹️ Stopped';
-
-  return `${status}\n⏰ Time remaining: ${minutesLeft}:${remainingSeconds.toString().padStart(2, '0')}\n🔔 Ends at: ${endTimeString}\n📝 Task: ${timerInfo.task}`;
 }
 
-// Helper function to get timer control buttons
-function getTimerButtons(state) {
+/**
+ * Handles timer control buttons (pause, resume, stop)
+ */
+async function handleTimerControlButton(req, res, componentId, member, guild_id) {
+  const timerId = `${member.user.id}_${guild_id}`;
+  const timerInfo = activeTimers.get(timerId);
+
+  // Verify timer exists and belongs to user
+  if (!timerInfo) {
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "⚠️ This timer doesn't exist or has already expired.",
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+
+  if (timerInfo.userId !== member.user.id) {
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "⚠️ You can only control your own timers!",
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+
+  // Process the button action
+  switch (componentId) {
+    case 'timer_pause':
+      if (timerInfo.state === TimerState.RUNNING) {
+        // Calculate remaining time and save it
+        const now = Math.floor(Date.now() / 1000);
+        timerInfo.remainingTime = timerInfo.endTime - now;
+        timerInfo.pausedAt = now;
+        timerInfo.state = TimerState.PAUSED;
+
+        // Cancel the existing timeout
+        if (timerInfo.timeoutId) {
+          clearTimeout(timerInfo.timeoutId);
+          timerInfo.timeoutId = null;
+        }
+      }
+      break;
+
+    case 'timer_resume':
+      if (timerInfo.state === TimerState.PAUSED) {
+        // Calculate new end time
+        const now = Math.floor(Date.now() / 1000);
+        timerInfo.endTime = now + timerInfo.remainingTime;
+        timerInfo.state = TimerState.RUNNING;
+
+        // Reschedule timer
+        scheduleTimerEnd(timerInfo);
+      }
+      break;
+
+    case 'timer_stop':
+      // Stop the timer
+      if (timerInfo.timeoutId) {
+        clearTimeout(timerInfo.timeoutId);
+      }
+
+      // Calculate elapsed time
+      const elapsedTime = calculateElapsedTime(timerInfo);
+
+      // Save session if it's at least 1 minute (60 seconds)
+      if (elapsedTime >= 60 && !timerInfo.saved) {
+        try {
+          await saveStudySession(
+            member.user.id,
+            timerInfo.task,
+            elapsedTime,
+            guild_id
+          );
+
+          timerInfo.saved = true;
+          const stats = await getUserStats(member.user.id);
+
+          return res.send({
+            type: InteractionResponseType.UPDATE_MESSAGE,
+            data: {
+              content: `⏹️ **Timer Stopped**\n\n` +
+                `⏱️ Duration: ${formatDurationDisplay(elapsedTime)}\n` +
+                `📝 Task: ${timerInfo.task}\n\n` +
+                `Session saved! Your updated stats:\n` +
+                `• Total sessions: ${stats.total_sessions}\n` +
+                `• Total time: ${formatTotalTime(stats.total_minutes)}`,
+              components: []
+            }
+          });
+        } catch (error) {
+          console.error('Error saving stopped session:', error);
+          return res.send({
+            type: InteractionResponseType.UPDATE_MESSAGE,
+            data: {
+              content: `⏹️ **Timer Stopped**\n\n` +
+                `⏱️ Duration: ${formatDurationDisplay(elapsedTime)}\n` +
+                `📝 Task: ${timerInfo.task}\n\n` +
+                `(Note: There was an error saving your stats)`,
+              components: []
+            }
+          });
+        }
+      } else {
+        let message = `⏹️ **Timer Stopped**\n\n` +
+          `⏱️ Duration: ${formatDurationDisplay(elapsedTime)}\n` +
+          `📝 Task: ${timerInfo.task}`;
+
+        if (elapsedTime < 60) {
+          message += `\n\nNote: Sessions under 1 minute are not saved.`;
+        } else if (timerInfo.saved) {
+          message += `\n\nNote: This session was already saved.`;
+        }
+
+        return res.send({
+          type: InteractionResponseType.UPDATE_MESSAGE,
+          data: {
+            content: message,
+            components: []
+          }
+        });
+      }
+
+      // Remove the timer
+      activeTimers.delete(timerId);
+      break;
+  }
+
+  // Update the timer message
+  return res.send({
+    type: InteractionResponseType.UPDATE_MESSAGE,
+    data: {
+      content: createTimerMessage(timerInfo),
+      components: createTimerControls(timerInfo.state)
+    }
+  });
+}
+
+/**
+ * Handles task completion buttons
+ */
+async function handleTaskCompletionButton(req, res, componentId, member, guild_id) {
+  const timerId = `${member.user.id}_${guild_id}`;
+  const timerInfo = activeTimers.get(timerId);
+
+  // Check if timer exists
+  if (!timerInfo) {
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "⚠️ Couldn't find your timer session.",
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+
+  // Verify this is the timer owner
+  if (timerInfo.userId !== member.user.id) {
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "⚠️ You can only respond to your own timers!",
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+
+  // Check if this session was already saved
+  if (timerInfo.saved) {
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "⚠️ This session has already been saved to the database.",
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+
+  // Calculate the duration of the session
+  const sessionDuration = calculateElapsedTime(timerInfo);
+
+  // Don't save sessions under 1 minute
+  if (sessionDuration < 60) {
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: "⚠️ Sessions under 1 minute are not saved.",
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+
+  try {
+    // Save the session
+    await saveStudySession(
+      member.user.id,
+      timerInfo.task,
+      sessionDuration,
+      guild_id
+    );
+
+    // Mark as saved to prevent duplicate saves
+    timerInfo.saved = true;
+    timerInfo.state = TimerState.COMPLETED;
+
+    // Get updated stats
+    const stats = await getUserStats(member.user.id);
+
+    let message = '';
+    if (componentId === 'task_complete') {
+      message = `🎉 Great job completing your task!\n\n` +
+        `Your updated stats:\n` +
+        `• Total sessions: ${stats.total_sessions}\n` +
+        `• Total time: ${formatTotalTime(stats.total_minutes)}`;
+    } else {
+      message = `💪 Progress is still progress!\n\n` +
+        `Your ${formatDurationDisplay(sessionDuration)} session has been recorded.\n\n` +
+        `Your updated stats:\n` +
+        `• Total sessions: ${stats.total_sessions}\n` +
+        `• Total time: ${formatTotalTime(stats.total_minutes)}\n\n` +
+        `Would you like to start another timer?`;
+    }
+
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: message,
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  } catch (error) {
+    console.error('Error saving session:', error);
+    return res.send({
+      type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
+      data: {
+        content: `❌ Error saving your session. Please try again.`,
+        flags: InteractionResponseFlags.EPHEMERAL
+      }
+    });
+  }
+}
+
+/**
+ * Schedules the timer completion notification
+ */
+function scheduleTimerEnd(timerInfo) {
+  // Calculate how many milliseconds until the timer ends
+  const now = Math.floor(Date.now() / 1000);
+  const msUntilEnd = (timerInfo.endTime - now) * 1000;
+
+  // Clear any existing timeout
+  if (timerInfo.timeoutId) {
+    clearTimeout(timerInfo.timeoutId);
+  }
+
+  // Don't schedule if timer is already past end time
+  if (msUntilEnd <= 0) {
+    sendTimerCompletionMessage(timerInfo);
+    return;
+  }
+
+  // Schedule the timer end notification
+  timerInfo.timeoutId = setTimeout(() => {
+    if (timerInfo.state === TimerState.RUNNING) {
+      sendTimerCompletionMessage(timerInfo);
+    }
+  }, msUntilEnd);
+}
+
+/**
+ * Sends the timer completion message with buttons
+ */
+async function sendTimerCompletionMessage(timerInfo) {
+  try {
+    // Create a new message with buttons
+    const endpoint = `channels/${timerInfo.channelId}/messages`;
+    await DiscordRequest(endpoint, {
+      method: 'POST',
+      body: {
+        content: `<@${timerInfo.userId}> ⏰ **Time's up!** Did you complete your task?\n📝 Task: ${timerInfo.task}`,
+        components: [
+          {
+            type: MessageComponentTypes.ACTION_ROW,
+            components: [
+              {
+                type: MessageComponentTypes.BUTTON,
+                custom_id: 'task_complete',
+                label: 'Yes, completed! ✅',
+                style: ButtonStyleTypes.SUCCESS,
+              },
+              {
+                type: MessageComponentTypes.BUTTON,
+                custom_id: 'task_incomplete',
+                label: 'Not yet ❌',
+                style: ButtonStyleTypes.SECONDARY,
+              }
+            ],
+          },
+        ],
+      },
+    });
+  } catch (err) {
+    console.error('Error sending timer completion message:', err);
+  }
+}
+
+/**
+ * Creates the timer message with Discord timestamps
+ */
+function createTimerMessage(timerInfo) {
+  let message = '';
+
+  if (timerInfo.state === TimerState.RUNNING) {
+    message = `⏱️ **Timer Running**\n\n` +
+      `⏰ Started: <t:${timerInfo.startTime}:R>\n` +
+      `⏰ Ends: <t:${timerInfo.endTime}:R>\n` +
+      `⏰ Duration: ${formatDurationDisplay(timerInfo.duration)}\n` +
+      `📝 Task: ${timerInfo.task}`;
+  } else if (timerInfo.state === TimerState.PAUSED) {
+    message = `⏸️ **Timer Paused**\n\n` +
+      `⏰ Started: <t:${timerInfo.startTime}:R>\n` +
+      `⏰ Paused: <t:${timerInfo.pausedAt}:R>\n` +
+      `⏰ Time Remaining: ${formatDurationDisplay(timerInfo.remainingTime)}\n` +
+      `📝 Task: ${timerInfo.task}`;
+  }
+
+  return message;
+}
+
+/**
+ * Creates timer control buttons based on state
+ */
+function createTimerControls(timerState) {
   const buttons = [];
 
-  if (state === TimerState.RUNNING) {
+  if (timerState === TimerState.RUNNING) {
     buttons.push({
       type: MessageComponentTypes.BUTTON,
       custom_id: 'timer_pause',
       label: '⏸️ Pause',
       style: ButtonStyleTypes.PRIMARY,
     });
-  } else if (state === TimerState.PAUSED) {
+  } else if (timerState === TimerState.PAUSED) {
     buttons.push({
       type: MessageComponentTypes.BUTTON,
       custom_id: 'timer_resume',
@@ -368,67 +550,17 @@ function getTimerButtons(state) {
   }];
 }
 
-// Helper function to schedule timer end
-function scheduleTimerEnd(timerInfo) {
-  const timeLeft = timerInfo.endTime - Date.now();
-
-  timerInfo.timeoutId = setTimeout(async () => {
-    if (timerInfo.state !== TimerState.RUNNING) return;
-
-    const timerId = `${timerInfo.userId}_${timerInfo.guildId}`;
-
-    try {
-      // Create a new message with buttons
-      const endpoint = `channels/${timerInfo.channelId}/messages`;
-      await DiscordRequest(endpoint, {
-        method: 'POST',
-        body: {
-          content: `<@${timerInfo.userId}> ⏰ Time is up! Did you complete your task?\n📝 Task: ${timerInfo.task}`,
-          flags: InteractionResponseFlags.SUPPRESS_EMBEDS,
-          components: [
-            {
-              type: MessageComponentTypes.ACTION_ROW,
-              components: [
-                {
-                  type: MessageComponentTypes.BUTTON,
-                  custom_id: 'task_complete',
-                  label: 'Yes, completed! ✅',
-                  style: ButtonStyleTypes.SUCCESS,
-                },
-                {
-                  type: MessageComponentTypes.BUTTON,
-                  custom_id: 'task_incomplete',
-                  label: 'No, not yet ❌',
-                  style: ButtonStyleTypes.DANGER,
-                }
-              ],
-            },
-          ],
-        },
-      });
-
-      // Clean up the timer
-      delete activeTimers[timerId];
-    } catch (err) {
-      console.error('Error sending timer completion message:', err);
-      delete activeTimers[timerId];
-    }
-  }, timeLeft);
-}
-
-app.listen(PORT, () => {
-  console.log('Listening on port', PORT);
-});
-
-
+/**
+ * Parses the timer input to extract duration and task
+ */
 function parseTimerInput(input, username) {
   // Default values
   let duration = 25 * 60; // 25 minutes in seconds
-  let task = `${username}'s timer`;
+  let task = `${username}'s study session`;
 
   if (!input) return { duration, task };
 
-  // Regular expression to match duration patterns (now including seconds)
+  // Regular expression for duration patterns (h, m, s)
   const durationRegex = /^(\d+)\s*([hms])/i;
   const match = input.match(durationRegex);
 
@@ -449,21 +581,90 @@ function parseTimerInput(input, username) {
         break;
     }
 
-    // Remove the duration part from input to get the task
+    // Extract task from remaining input
     task = input.slice(match[0].length).trim();
-  } else {
-    // If no duration specified, treat entire input as task
-    task = input.trim();
-  }
 
-  // If task is empty after parsing duration, use default personalized task
-  if (!task) {
-    task = `${username}'s timer`;
+    // Default task if none provided
+    if (!task) {
+      task = `${username}'s study session`;
+    }
+  } else {
+    // If no duration pattern found, treat as task description
+    task = input.trim() || `${username}'s study session`;
   }
 
   return { duration, task };
 }
-function generateDiscordHeatmap(data) {
+
+/**
+ * Formats a duration in seconds for display
+ */
+function formatDurationDisplay(seconds) {
+  if (seconds < 60) {
+    return `${seconds} second${seconds !== 1 ? 's' : ''}`;
+  } else if (seconds < 3600) {
+    const minutes = Math.floor(seconds / 60);
+    return `${minutes} minute${minutes !== 1 ? 's' : ''}`;
+  } else {
+    const hours = Math.floor(seconds / 3600);
+    const minutes = Math.floor((seconds % 3600) / 60);
+    return minutes > 0 ?
+      `${hours} hour${hours !== 1 ? 's' : ''} ${minutes} minute${minutes !== 1 ? 's' : ''}` :
+      `${hours} hour${hours !== 1 ? 's' : ''}`;
+  }
+}
+
+/**
+ * Formats total time for stats display
+ */
+function formatTotalTime(totalMinutes) {
+  if (!totalMinutes) return '0 minutes';
+
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = Math.floor(totalMinutes % 60);
+
+  if (hours === 0) {
+    return `${minutes} minute${minutes !== 1 ? 's' : ''}`;
+  } else if (minutes === 0) {
+    return `${hours} hour${hours !== 1 ? 's' : ''}`;
+  } else {
+    return `${hours} hour${hours !== 1 ? 's' : ''} ${minutes} minute${minutes !== 1 ? 's' : ''}`;
+  }
+}
+
+/**
+ * Gets medal emoji for leaderboard position
+ */
+function getLeaderboardMedal(position) {
+  switch (position) {
+    case 0: return '🥇';
+    case 1: return '🥈';
+    case 2: return '🥉';
+    default: return `${position + 1}.`;
+  }
+}
+
+/**
+ * Calculates elapsed time for a timer in seconds
+ */
+function calculateElapsedTime(timerInfo) {
+  if (timerInfo.state === TimerState.PAUSED) {
+    // For paused timers, calculate based on when it was paused
+    return Math.floor(timerInfo.duration - timerInfo.remainingTime);
+  } else {
+    // For running or completed timers
+    const endTime = Math.min(
+      Math.floor(Date.now() / 1000),
+      timerInfo.endTime
+    );
+    return Math.floor(endTime - timerInfo.startTime);
+  }
+}
+
+/**
+ * Generates study pattern heatmap
+ */
+function generateStudyHeatmap(data) {
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const timeBlocks = [
     '12am-4am',
@@ -522,28 +723,7 @@ function generateDiscordHeatmap(data) {
   return heatmap;
 }
 
-function createTimerInfo(userId, task, duration, guildId, token) {
-  return {
-    userId,
-    task,
-    duration,
-    startTime: Date.now(),
-    endTime: Date.now() + (duration * 1000),
-    state: TimerState.RUNNING,
-    guildId,
-    interactionToken: token // Store the token
-  };
-}
-function formatDurationDisplay(duration) {
-  if (duration < 60) {
-    return `${duration} seconds`;
-  } else if (duration < 3600) {
-    return `${Math.floor(duration / 60)} minutes`;
-  } else {
-    const hours = Math.floor(duration / 3600);
-    const minutes = Math.floor((duration % 3600) / 60);
-    return minutes > 0 ?
-      `${hours} hours ${minutes} minutes` :
-      `${hours} hours`;
-  }
-}
+// Start the server
+app.listen(PORT, () => {
+  console.log(`Pomodoro Bot server running on port ${PORT}`);
+});
